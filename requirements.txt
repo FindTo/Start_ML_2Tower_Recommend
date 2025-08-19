@@ -1,0 +1,16 @@
+fastapi==0.115.12
+pandas==2.2.2
+sqlalchemy==2.0.40
+numpy==2.0.2
+pydantic==2.11.3
+scikit_learn==1.6.1
+psycopg2-binary==2.9.10
+uvicorn==0.34.2
+loguru==0.7.3
+matplotlib==3.8.4
+python-dotenv==0.20.0
+ipython==9.4.0
+torch~=2.8.0
+tqdm~=4.66.5
+transformers==4.55.0
+datasets==4.0.0
