@@ -230,15 +230,19 @@ def get_post_feed(id: int, limit: int = 10, db: Session = Depends(get_db)):
 
 @app.get("/post/recommendations/", response_model=List[PostGet])
 def recommended_posts(id: int, time: datetime, limit: int = 5) -> List[PostGet]:
+    logger.info("Endpoint enter")
 
     # Create user embedding - timestamp convertion and single NN reference
     user_embed = get_user_embedding(id, time, user_df, model)
+
+    logger.info("User ebedding created")
 
     post_ids, post_prob, post_scor  = recommend_top_k(user_embed,
                                                       item_embeds_np,
                                                       item_ids_np,
                                                       5)
 
+    logger.info("Top posts are ready")
     # First n=limit posts from pull with max like probability
     posts_recommend = post_ids.tolist()
     post_prob = post_prob.tolist()
