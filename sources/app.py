@@ -24,9 +24,6 @@ import os
 # Load environment variables
 load_dotenv()
 
-# Create app instance
-app = FastAPI()
-
 def get_db():
     with SessionLocal() as db:
         return db
@@ -178,6 +175,9 @@ post_original_df = get_post_df()
 
 # Create post embedding vectors as np array and post_id column
 item_ids_np, item_embeds_np = generate_item_embeddings(model,item_dataset)
+
+# Create app instance
+app = FastAPI()
 
 @app.get("/user/{id}", response_model = UserGet)
 def get_user(id: int, db: Session = Depends(get_db)):
