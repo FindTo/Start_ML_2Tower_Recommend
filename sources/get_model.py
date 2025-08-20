@@ -18,7 +18,9 @@ def load_models(model_path):
     model = TwoTowerModel(user_tower, item_tower)
 
     model.load_state_dict(torch.load(model_path,
-                    map_location=torch.device('cpu')))
+                                     map_location=torch.device('cpu'),
+                                     weights_only=False)
+                          )
     model.eval()
 
     return model
