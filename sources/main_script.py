@@ -82,9 +82,9 @@ if __name__ == "__main__":
                                              lr=LEARNING_RATE,
                                              is_new_model=False)
 
-# # Send user and post features to the DB from local .csv files
-# user_features = pd.read_csv('user_df_encoded_for_2towers.csv', sep=';')
-# post_features = pd.read_csv('post_df_encoded_for_2towers.csv', sep=';')
-#
-# df_to_sql(user_features, os.getenv('USER_FEATURES_NN'))
-# df_to_sql(post_features, os.getenv('POST_FEATURES_NN'))
+    # Send user and post features to the DB from local .csv files
+    # user_features = pd.read_csv('user_df_encoded_for_2towers.csv', sep=';')
+    # post_features = pd.read_csv('post_df_encoded_for_2towers.csv', sep=';')
+
+    df_to_sql(user_features, os.getenv('USER_FEATURES_NN'))
+    df_to_sql(post_features, os.getenv('POST_FEATURES_NN'))

@@ -46,6 +46,10 @@ like actions.
 
 **Python ver. 3.12**
 
+- There is a dockerfile and .dockerignore inside the project, which are aimed for server version with **Python 3.11** and 
+**Torch 2.71+cpu**. Docker version is supposed for web service demonstration at 
+`https://startml2towerrecommend-production.up.railway.app/`, where you can try to send query and receive a response.
+
 The **main_script.py** contains all feature preparation functions and calls, you can launch it cnd check process. 
 But .env file will be necessary for DB connections and output features file naming.
 The basic pipelane: generate BERT-like embeddings for post texts using HuggingFace Roberta, then compress it to 128D. 
@@ -57,9 +61,8 @@ local user and posts from the corresponding NN towers outputs.
 The **app.py** is used for web service operation. User_ID and timestamp are being received as an input. Then endpoint
 function generates user tower embedding, normalizes and dots it with all item embeddings. The obtained list of scores 
 therefore helps to create a top of n posts. Activation using `uvicorn app:app --port 8000`, or with another port. 
-Example of http query (GET method): `http://localhost:8000/post/recommendations/?id=121245&time=2021-01-06 12:41:55`
-
-
+Example of http query (GET method): 
+`http://startml2towerrecommend-production.up.railway.app/post/recommendations/?id=121245&time=2021-01-06 12:41:55`
 
 File **learn_model.py** contains classes and functions for 2Tower and MLP autoencoder training, including datasets 
 preparations. That's all is used in **main_script.py**.
