@@ -114,6 +114,13 @@ def get_user_embedding(user_id, timestamp, user_df, model, device='cpu'):
     # Make user row
     user_row = user_df.loc[user_id]
 
+    if user_row == None:
+
+        raise HTTPException(404, "user not found")
+
+    else:
+        logger.info(user_row)
+
     # Convert to tensors using correct datatypes
     user_cat = torch.tensor([[user_row[cat] for cat in USER_CAT_FEATURES]], dtype=torch.long).to(device)
     user_num = torch.tensor([[user_row[num] for num in user_num_features]], dtype=torch.float32).to(device)
