@@ -111,15 +111,13 @@ def get_user_embedding(user_id, timestamp, user_df, model, device='cpu'):
 
         return time_list
 
-    # Make user row
-    user_row = user_df.loc[user_id]
+    try:
+        # Find user by input ID
+        user_row = user_df.loc[user_id]
 
-    if user_row.empty:
-
-        raise HTTPException(404, "user not found")
-
-    else:
-        logger.info(user_row.iloc[0])
+    except KeyError:
+        # if incorrect user_id - 404 error
+        raise HTTPException(404, detail=f"user {user_id} not found")
 
     # Convert to tensors using correct datatypes
     user_cat = torch.tensor([[user_row[cat] for cat in USER_CAT_FEATURES]], dtype=torch.long).to(device)
