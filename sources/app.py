@@ -245,7 +245,7 @@ def recommended_posts(id: int, time: datetime, limit: int = 5) -> List[PostGet]:
     post_ids, post_prob, post_scor  = recommend_top_k(user_embed,
                                                       item_embeds_np,
                                                       item_ids_np,
-                                                      5)
+                                                      limit)
 
     logger.info("Top posts are ready")
     # First n=limit posts from pull with max like probability

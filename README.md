@@ -12,7 +12,7 @@ by http request.
 
 ---
 
-# Input dataframe structure:
+# Input SQL tables structure
 
 ## User_data
 
@@ -73,6 +73,18 @@ File **get_post_embeddings.py** contains functions for post embedding generation
 
 Some modules - like **database.py**, **schema.py**, **table_feed.py**, **table_post.py** and **table_user.py** are used 
 for setting SQLAlchemy ORM and Pydantic data formats.
+
+# Endpoints
+
+- **/user/{id}**: find relevant user info by id={id} and return as JSON
+- **/post/{id}**: find relevant post info  by id={id} and return as JSON
+- **/user/{id}/feed/?limit=LIMIT**: should return all actions from the feed for the user with id = {id}, sorted by 
+actuality with limit=LIMIT
+- **/post/{id}/feed/?limit=LIMIT**: should return all actions from the feed for the post with id = {id}, sorted by 
+actuality with limit=LIMIT
+- **/post/recommendations/?id=ID&time=TIMESTAMP&limit=LIMIT**: should return the top limit=LIMIT of recommended posts for the user with
+user_id=ID at moment of time=TIMESTAMP (string datetime format %Y-%m-%d %H:%M:%S). There is the core endpoint for
+recommendations.
 
 
 
