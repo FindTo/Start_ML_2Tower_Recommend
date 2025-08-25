@@ -76,17 +76,8 @@ def get_vector_df(post_embed, feed_n_lines=1512000, is_csv=False, sep=';'):
         user = get_user_df()
         post = get_post_df()
 
-        feed = pd.read_sql(f"""
-            WITH chunk AS (
-                SELECT *
-                FROM public.feed_data
-                TABLESAMPLE SYSTEM (40)
-            )
-            SELECT *
-            FROM chunk
-            ORDER BY random()
-            LIMIT 3000000;
-        """, os.getenv('DATABASE_URL'))
+        feed = pd.read_sql(f"SELECT * FROM public.feed_data order by random() LIMIT {feed_n_lines};",
+                           os.getenv('DATABASE_URL'))
 
         feed = feed.drop_duplicates()
         print(feed.head())

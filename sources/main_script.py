@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 import pandas as pd
 import os
 
-N_EPOCHS = 3
+N_EPOCHS = 9
 LEARNING_RATE = 5e-4
 
 if __name__ == "__main__":
@@ -31,19 +31,20 @@ if __name__ == "__main__":
 
     # Train autoencoder
     autoencoder_model, _ = autoencoder_train(df_post_embed)
+
     # Create dataset object form post embeddings dataframe
     post_dataset = Post_Data(df_post_embed)
 
     # Receive 128d embeddings
     df_post_128d = get_128d_embeddings(autoencoder_model, post_dataset)
 
-    # df_post_128d = get_embedd_df(is_csv=True)
+    df_post_128d = get_embedd_df(is_csv=True)
 
 
     # Fetch DB data for user, post and feed
     user_features, post_features, feed_encoded = get_vector_df(df_post_128d,
-                                                               feed_n_lines=3000000,
-                                                               is_csv=True)
+                                                               feed_n_lines=1512000,
+                                                               is_csv=False)
 
     dataset = InteractionDataset(feed_encoded,
                                  user_features,
@@ -80,9 +81,9 @@ if __name__ == "__main__":
                                              test_loader,
                                              epochs=N_EPOCHS,
                                              lr=LEARNING_RATE,
-                                             is_new_model=False)
+                                             is_new_model=True)
 
-    # Send user and post features to the DB from local .csv files
+    # # Send user and post features to the DB from local .csv files
     # user_features = pd.read_csv('user_df_encoded_for_2towers.csv', sep=';')
     # post_features = pd.read_csv('post_df_encoded_for_2towers.csv', sep=';')
 
