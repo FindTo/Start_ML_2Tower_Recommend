@@ -44,17 +44,17 @@ def df_to_sql(df, name):
     chunks = []
     try:
 
-        print(("to_sql - start writing"))
+        print((f"to_sql - start writing {name}"))
         df.to_sql(name,
                   con=engine,
                   if_exists='replace',
                   index=False)
-        print(("to_sql - successfully written"))
+        print((f"to_sql - {name} successfully written"))
         conn.close()
 
     except:
 
-        print(("to_sql - failed to write"))
+        print((f"to_sql - failed to write {name}"))
         conn.close()
 
     return 0

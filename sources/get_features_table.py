@@ -18,17 +18,17 @@ def df_to_sql(df, name):
     chunks = []
     try:
 
-        print(("to_sql - start writing"))
+        print((f"to_sql - start writing {name}"))
         df.to_sql(name,
                   con=engine,
                   if_exists='replace',
                   index=False)
-        print(("to_sql - successfully written"))
+        print((f"to_sql - {name} successfully written"))
         conn.close()
 
     except:
 
-        print(("to_sql - failed to write"))
+        print((f"to_sql - failed to write {name}"))
         conn.close()
 
     return 0
@@ -69,13 +69,13 @@ def load_features(features_name) -> pd.DataFrame:
 
     try:
 
-        print(("from sql - start loading"))
+        print((f"from sql - start loading {features_name}"))
         for chunk_dataframe in pd.read_sql(features_name,
                                            conn, chunksize=int(os.getenv('CHUNKSIZE'))):
 
             chunks.append(chunk_dataframe)
 
-        print(("from sql - loaded successfully"))
+        print((f"from sql - {features_name} loaded successfully"))
 
     except Exception as e:
 
