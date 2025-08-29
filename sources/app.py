@@ -218,6 +218,11 @@ def get_user_feed(id: int, limit: int = 10, db: Session = Depends(get_db)):
 
     return data
 
+@app.get("/")
+def ping():
+
+    return "The 2tower recommendation service is active"
+
 @app.get("/post/{id}/feed", response_model=List[FeedGet])
 def get_post_feed(id: int, limit: int = 10, db: Session = Depends(get_db)):
 
