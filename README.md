@@ -10,7 +10,14 @@ It's the web service to get recommendations for users in social network.
 Retrieving data from tables User, Posts and Feed, the list of top recommended posts per selected user can be obtained 
 by http request.
 
----
+Here the 2tower neural network model was implemented: features of user and item are being processed 
+and used as inputs for user-tower NN and item-tower NN. Both of them generate 64D embeddings, cosine similarity 
+between these vectors means score of potential interaction - is it going to be a like or not. Score can be converted
+into probability of like using sigmoid function. The top of cosine scores for user and posts - e.g. top of like 
+probabilities - is being taken for recommendation. Such approach requires only single NN inference per query for the 
+chosen user and single scalar multiplication between user embedding and vector of all post embeddings, with quicksort of 
+the taken score list. That means much faster response time - about 10ms, with decent flexibility of feature processing:
+MLP or transformer with interaction history per user may be used. 
 
 # Input SQL tables structure
 
