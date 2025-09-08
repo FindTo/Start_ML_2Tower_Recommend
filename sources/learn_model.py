@@ -1,10 +1,12 @@
+import math
+from typing import Any
+
 import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
-from torch.optim import Adam
-from sklearn.metrics import accuracy_score, roc_auc_score
+from sklearn.metrics import accuracy_score, roc_auc_score, average_precision_score
 from sklearn.preprocessing import LabelEncoder
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -23,15 +25,17 @@ USER_CAT_FEATURES = {
 USER_NUM_FEATURES_CNT = 5
 
 ITEM_CAT_FEATURES = {
-    'post_id': {'vocab_size': 7319, 'embed_dim': 32},
+    'post_id': {'vocab_size': 7319, 'embed_dim': 16},
     'topic': {'vocab_size': 7, 'embed_dim': 4}
 }
 
 ITEM_NUM_FEATURES_CNT = 131
 TIME_FEATURES_CNT = 8
 
+HISTORY_LENGTH = 8
+
 EMBEDDING_DIM = 64
-BATCH_SIZE = 1024
+BATCH_SIZE = 256
 N_EPOCHS = 7
 LEARNING_RATE = 1e-3
 
@@ -66,8 +70,11 @@ def get_vector_df(post_embed, feed_n_lines=1512000, is_csv=False, sep=';'):
     if is_csv:
 
         user_features=pd.read_csv('user_df_encoded_for_2towers.csv', sep=sep)
+        print('user_df_encoded_for_2towers.csv is loaded')
         post_features = pd.read_csv('post_df_encoded_for_2towers.csv', sep=sep)
+        print('post_df_encoded_for_2towers.csv is loaded')
         feed_encoded = pd.read_csv('feed_df_encoded_for_2towers.csv', sep=sep)
+        print('feed_df_encoded_for_2towers.csv is loaded')
 
         return user_features, post_features, feed_encoded
     else:
@@ -556,7 +563,10 @@ class ItemDataset(Dataset):
     def __init__(self,
                  item_features,
                  item_cat):
+
         self.item_features = item_features
+        self.item_features['idx'] = self.item_features['post_id']
+        self.item_features.set_index('idx', inplace=True)
 
         # Lists of categoral and mumerical column names
         self.item_cat_columns = item_cat
@@ -576,126 +586,322 @@ class ItemDataset(Dataset):
 
         return item_cat, item_num, item_id
 
-# Dataset for NN learning based on the interaction history
-class InteractionDataset(Dataset):
-    def __init__(self,
-                 interactions,
-                 user_features,
-                 item_features,
-                 user_cat,
-                 item_cat):
-        self.interactions = interactions
+
+def build_user_histories(feed_encoded: pd.DataFrame, max_history: int = 50):
+    """
+    Build user history pool for Transformer-based UserTower.
+    For each user, store their events sorted by time_indicator.
+    During training or inference, select the last n <= max_history events
+    with time_indicator < current item's time_indicator.
+
+    Args:
+        feed_encoded: DataFrame with columns
+            ['user_id','post_id','time_indicator','hour_sin','hour_cos',
+             'weekday_sin','weekday_cos','month_sin','month_cos','is_weekend','target']
+        max_history: maximum history length to keep per user
+
+    Returns:
+        user_histories: dict mapping user_id -> dict with keys:
+            'post_ids': np.array of shape [num_events] (int32)
+            'time_indicators': np.array of shape [num_events] (float32)
+            'time_features': np.array of shape [num_events, 8] (float32)
+            'targets': np.array of shape [num_events] (float32)
+    """
+
+    user_histories = {}
+
+    print('User histories dict - starting creation process...')
+
+    # Sort by time_indicator ascending to respect temporal order
+    feed_encoded = feed_encoded.sort_values('time_indicator')
+
+    # Group by user
+    grouped = feed_encoded.groupby('user_id')
+
+    for user_id, user_rows in tqdm(grouped, desc='Histories creation', leave=False):
+        # Convert to list of dicts for easy random sampling
+        user_events = user_rows[['post_id', 'time_indicator', 'target']].to_dict(orient='records')
+        n_events = len(user_events)
+
+        if n_events >= max_history:
+            # Randomly sample max_history events
+            sampled_events = np.random.choice(n_events, max_history, replace=False)
+            sampled_events = [user_events[i] for i in sampled_events]
+            # Sort sampled events by time_indicator
+            sampled_events = sorted(sampled_events, key=lambda x: x['time_indicator'])
+        else:
+            # Take all events
+            sampled_events = user_events
+
+        # Padding
+        n_pad = max_history - len(sampled_events)
+
+        post_ids = np.array([e['post_id'] for e in sampled_events] + [0] * n_pad, dtype=np.int32)
+        time_indicators = np.array([e['time_indicator'] for e in sampled_events] + [0.0] * n_pad, dtype=np.float32)
+        targets = np.array([e['target'] for e in sampled_events] + [0] * n_pad, dtype=np.float32)
+        mask = np.array([1] * len(sampled_events) + [0] * n_pad, dtype=np.float32)
+
+        user_histories[user_id] = {
+            'post_ids': post_ids,
+            'time_indicators': time_indicators,
+            'targets': targets,
+            'mask': mask
+        }
+
+    print('User histories dict - ready')
+
+    return user_histories
+
+# Interaction dataset with history of interactions before the designated one in feed_data
+class InteractionDatasetWithHistory(Dataset):
+    def __init__(
+        self,
+        feed_df: pd.DataFrame,
+        user_features: pd.DataFrame,
+        item_features: pd.DataFrame,
+        user_cat: dict,
+        item_cat: dict,
+        user_histories: dict,
+        lim_hist: int = 5,
+        device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    ):
+        """
+        feed_df: feed with columns ['user_id','post_id','time_indicator',..., 'target']
+        user_features: user features df
+        item_features: item features df
+        user_cat/item_cat: dict of categorical features
+        user_histories: output of build_user_histories(feed_df, max_history=N)
+        lim_hist: how many last interactions to pick for current feed row
+        """
+        self.feed_df = feed_df.reset_index(drop=True)
         self.user_features = user_features
         self.item_features = item_features
+        self.user_cat_columns = user_cat
+        self.user_num_columns = [x for x in self.user_features.columns if x not in self.user_cat_columns]
+        self.item_cat_columns = item_cat
+        self.item_num_columns = [x for x in self.item_features.columns if x not in self.item_cat_columns]
+        self.user_histories = user_histories
+        self.lim_hist = lim_hist
+        self.device = device
 
-        # Add an extra id column for fast access via index
+        # Create fast index access
         self.user_features['user_id_idx'] = self.user_features['user_id']
         self.user_features.set_index('user_id_idx', inplace=True)
         self.item_features['post_id_idx'] = self.item_features['post_id']
         self.item_features.set_index('post_id_idx', inplace=True)
 
-        # Lists of categoral and mumerical column names
-        self.user_cat_columns = user_cat
-        self.user_num_columns = [x for x in self.user_features.columns.to_list() if
-                                 x not in self.user_cat_columns.keys()]
-        self.item_cat_columns = item_cat
-        self.item_num_columns = [x for x in self.item_features.columns.to_list() if
-                                 x not in self.item_cat_columns.keys()]
-
     def __len__(self):
-        return len(self.interactions)
+        return len(self.feed_df)
 
     def __getitem__(self, idx):
-        interaction = self.interactions.iloc[idx]
-        user_id = interaction['user_id']
-        post_id = interaction['post_id']
-        target = interaction['target']
+        row = self.feed_df.iloc[idx]
+        user_id = row['user_id']
+        post_id = row['post_id']
+        target = row['target']
+        time_indicator = row['time_indicator']
 
-        # Retrieving user features
+        # --- User main features ---
         user_row = self.user_features.loc[user_id]
-
         user_cat = torch.tensor([user_row[f] for f in self.user_cat_columns], dtype=torch.long)
         user_num = torch.tensor([user_row[f] for f in self.user_num_columns], dtype=torch.float)
 
-        # Retrieving time features
-        time_num = torch.tensor(interaction[['time_indicator',
-                                                        'hour_sin',
-                                                        'hour_cos',
-                                                        'weekday_sin',
-                                                        'weekday_cos',
-                                                        'month_sin',
-                                                        'month_cos',
-                                                        'is_weekend'
-                                                        ]].values, dtype=torch.float)
-
-        # Retrieving post features
+        # --- Item features ---
         item_row = self.item_features.loc[post_id]
-
         item_cat = torch.tensor([item_row[f] for f in self.item_cat_columns], dtype=torch.long)
         item_num = torch.tensor([item_row[f] for f in self.item_num_columns], dtype=torch.float)
 
-        return user_cat, user_num, time_num, item_cat, item_num, torch.tensor(target, dtype=torch.float)
+        # --- User history ---
+        hist_post_ids = np.zeros(self.lim_hist, dtype=np.int32)
+        hist_interactions = np.zeros(self.lim_hist, dtype=np.float32)
+        hist_mask = np.zeros(self.lim_hist, dtype=np.float32)
 
+        # --- Item features for historical data ---
+        hist_post_cat = torch.zeros((self.lim_hist, len(self.item_cat_columns)), dtype=torch.long)
+        hist_post_num = torch.zeros((self.lim_hist, len(self.item_num_columns)), dtype=torch.float)
+
+        if user_id in self.user_histories:
+
+            user_hist = self.user_histories[user_id]
+            # Only events before current item
+            mask_time = user_hist['time_indicators'] < time_indicator
+            filtered_post_ids = user_hist['post_ids'][mask_time]
+            filtered_targets = user_hist['targets'][mask_time]
+
+            n_hist = min(self.lim_hist, len(filtered_post_ids))
+            if n_hist > 0:
+                hist_post_ids[-n_hist:] = filtered_post_ids[-n_hist:]
+                hist_interactions[-n_hist:] = filtered_targets[-n_hist:]
+                hist_mask[-n_hist:] = 1.0  # mark as real events
+
+                for i in range(n_hist):
+                    post_id_hist = filtered_post_ids[-n_hist:][i]  # the last n_hist posts
+                    if post_id_hist == 0:  # padding check
+                        continue
+                    post_row = self.item_features.loc[post_id_hist]
+                    hist_post_cat[i] = torch.tensor([post_row[f] for f in self.item_cat_columns], dtype=torch.long)
+                    hist_post_num[i] = torch.tensor([post_row[f] for f in self.item_num_columns], dtype=torch.float)
+
+        return (
+            user_cat,
+            user_num,
+            torch.tensor(row[['time_indicator','hour_sin','hour_cos','weekday_sin',
+                              'weekday_cos','month_sin','month_cos','is_weekend']].values, dtype=torch.float),
+            item_cat,
+            item_num,
+            hist_post_cat,
+            hist_post_num,
+            torch.tensor(hist_interactions, dtype=torch.float),
+            torch.tensor(time_indicator, dtype=torch.float),
+            torch.tensor(hist_mask, dtype=torch.float),
+            torch.tensor(target, dtype=torch.float)
+        )
 
 # User tower - NN for user embedding
 class UserTower(nn.Module):
-    def __init__(self):
+    def __init__(
+            self,
+            user_cat_features,
+            user_num_features_cnt,
+            time_features_cnt,
+            item_tower: nn.Module,
+            embedding_dim: int = 64,
+            history_length: int = 5,
+            n_head: int = 4,
+            num_layers: int = 2,
+            dropout : float = 0.3,
+    ):
+        """
+        user_cat_features: dict with categorical user features {feature_name: {'vocab_size', 'embed_dim'}}
+        user_num_features_cnt: int, number of numeric user features
+        time_features_cnt: int, number of time features
+        item_tower: nn.Module, pretrained/frozen ItemTower returning item embeddings
+        embedding_dim: output embedding dimension for user
+        history_length: max length of historical interactions
+        n_head: number of attention heads in transformer
+        num_layers: number of transformer encoder layers
+        """
+
         super().__init__()
+
+        self.embedding_dim = embedding_dim
+        self.history_len  = history_length
+        self.item_tower = item_tower
 
         # Cat features - to embeddings with selected dim
         self.embeddings = nn.ModuleDict()
         self.dropout = nn.Dropout(0.1)
 
-        for feature, params in USER_CAT_FEATURES.items():
+        for feature, params in user_cat_features.items():
             self.embeddings[feature] = nn.Embedding(
                 params['vocab_size'] + 1,
                 params['embed_dim']
             )
 
         # Fully connected layers
-        total_embed_dim = sum(params['embed_dim'] for params in USER_CAT_FEATURES.values())
+        total_input_dim = sum([params['embed_dim'] for params in user_cat_features.values()]) \
+                          + user_num_features_cnt + time_features_cnt
 
         self.fc1 = nn.Sequential(
 
-            nn.Linear(total_embed_dim + USER_NUM_FEATURES_CNT + TIME_FEATURES_CNT, 128),
-            nn.BatchNorm1d(128),
+            nn.Linear(total_input_dim, 128),
+            nn.LayerNorm(128),
             nn.ReLU(),
-            nn.Dropout(p=0.3),
+            nn.Dropout(dropout),
         )
 
         self.fc2 = nn.Sequential(
 
             nn.Linear(128, 128),
-            nn.BatchNorm1d(128),
+            nn.LayerNorm(128),
             nn.ReLU(),
-            nn.Dropout(0.3)
+            nn.Dropout(dropout)
         )
 
-        self.fc3 = nn.Sequential(
-            nn.Linear(128, 96),
-            nn.BatchNorm1d(96),
-            nn.ReLU(),
-            nn.Dropout(0.2)
+        self.output = nn.Linear(128, embedding_dim)
+
+        self.hist_proj = nn.Linear(self.embedding_dim + 2, self.embedding_dim)
+
+        # Transformer for history embeddings
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embedding_dim,
+            nhead=n_head,
+            dim_feedforward=embedding_dim * 2,
+            dropout=dropout,
+            batch_first=True,
+            activation='relu'
+        )
+        self.history_transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        # Final MLP to fuse static + history
+        self.fusion = nn.Sequential(
+            nn.Linear(embedding_dim * 2, embedding_dim),
+            nn.LayerNorm(embedding_dim),
+            nn.ReLU()
         )
 
-        self.output = nn.Linear(96, EMBEDDING_DIM)
+    @staticmethod
+    def get_sin_cos_positional_encoding(seq_len, embed_dim, device="cpu"):
+        positions = torch.arange(seq_len, dtype=torch.float32, device=device).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, embed_dim, 2, dtype=torch.float32, device=device) *
+                             -(math.log(10000.0) / embed_dim))
+        pe = torch.zeros(seq_len, embed_dim, device=device)
+        pe[:, 0::2] = torch.sin(positions * div_term)
+        pe[:, 1::2] = torch.cos(positions * div_term)
+        return pe  # [seq_len, embed_dim]
 
-    def forward(self, cat_features, num_features, time_features):
-        # Cat features - to embeddings
+    def forward(self,
+                user_cat,
+                user_num,
+                time_features,
+                hist_post_cat,
+                hist_post_num,
+                hist_targets,
+                hist_time_ind,
+                hist_mask):
+        """
+        user_cat: [batch, num_cat_features]
+        user_num: [batch, num_num_features]
+        time_features: [batch, time_features_cnt]
+        hist_post_cat, hist_post_num: [batch, hist_len, ...]
+        hist_targets, hist_time_ind: [batch, hist_len]
+        """
+        # --- Static user features ---
         embeddings = []
-        for i, (feature, _) in enumerate(USER_CAT_FEATURES.items()):
-            emb = self.dropout(self.embeddings[feature](cat_features[:, i]))
+        for i, feature in enumerate(self.embeddings.keys()):
+            emb = self.dropout(self.embeddings[feature](user_cat[:, i]))
             embeddings.append(emb)
-
         # Concat all features tensors
-        x = torch.cat(embeddings + [num_features] + [time_features], dim=1)
+        x = torch.cat(embeddings + [user_num] + [time_features], dim=1)
 
+        # Static MLP for user
         x = self.fc1(x)
-        residual = x  # bypass vector for skip connextion
-        x = self.fc2(x)
-        x = x + residual  # skip connection
-        x = self.fc3(x)
-        return self.output(x)
+        x = x + self.fc2(x)  # skip connection
+        static_emb = self.output(x)
+
+        # --- History ---
+        hist_post_emb = self.item_tower(hist_post_cat, hist_post_num)  # [batch, hist_len, embedding_dim]
+        hist_extra = torch.stack([hist_targets, hist_time_ind], dim=2)  # [batch, hist_len, 2]
+        hist_x = torch.cat([hist_post_emb, hist_extra], dim=2)  # [batch, hist_len, embedding_dim + 2]
+        hist_x = self.hist_proj(hist_x) # Align with embedding_dim
+
+        # Positional encoding
+        seq_len = hist_x.size(1)
+        pos_enc = self.get_sin_cos_positional_encoding(seq_len, hist_x.size(2), device=hist_x.device)
+        hist_x = hist_x + pos_enc.unsqueeze(0)  # [1, seq_len, embed_dim+2] broadcast
+
+        # Masked transformer
+        src_key_padding_mask = hist_mask.bool() == 0  # True where padding
+        hist_out = self.history_transformer(hist_x, src_key_padding_mask=src_key_padding_mask)
+
+        # Masked mean pooling
+        hist_mask = hist_mask.unsqueeze(2)  # [B, hist_len, 1]
+        hist_out_masked = hist_out * hist_mask
+        hist_emb = hist_out_masked.sum(dim=1) / (hist_mask.sum(dim=1) + 1e-6)
+
+        # --- Fusion ---
+        user_final = self.fusion(torch.cat([static_emb, hist_emb], dim=1))  # [B, embedding_dim]
+
+        return user_final
 
 
 # Item tower - NN for post embedding
@@ -719,7 +925,7 @@ class ItemTower(nn.Module):
         self.fc1 = nn.Sequential(
 
             nn.Linear(total_embed_dim + ITEM_NUM_FEATURES_CNT, 128),
-            nn.BatchNorm1d(128),
+            nn.LayerNorm(128),
             nn.ReLU(),
             nn.Dropout(p=0.3),
         )
@@ -727,19 +933,12 @@ class ItemTower(nn.Module):
         self.fc2 = nn.Sequential(
 
             nn.Linear(128, 128),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.Dropout(0.3)
-        )
-
-        self.fc3 = nn.Sequential(
-            nn.Linear(128, 96),
-            nn.BatchNorm1d(96),
+            nn.LayerNorm(128),
             nn.ReLU(),
             nn.Dropout(0.2)
         )
 
-        self.output = nn.Linear(96, EMBEDDING_DIM)
+        self.output = nn.Linear(128, EMBEDDING_DIM)
 
     def forward(self, cat_features, num_features):
 
@@ -756,7 +955,6 @@ class ItemTower(nn.Module):
         residual = x  # bypass vector for skip connection
         x = self.fc2(x)
         x = x + residual  # skip connection
-        x = self.fc3(x)
         return self.output(x)
 
 
@@ -767,18 +965,41 @@ class TwoTowerModel(nn.Module):
         self.user_tower = user_tower
         self.item_tower = item_tower
 
-    def forward(self, user_cat, user_num, time_num, item_cat, item_num):
-        user_embedding = self.user_tower(user_cat, user_num, time_num)
+    def forward(self,
+                user_cat,
+                user_num,
+                time_num,
+                item_cat,
+                item_num,
+                hist_post_cat,
+                hist_post_num,
+                hist_targets,
+                hist_time_ind,
+                hist_mask
+                ):
+
+
+        user_embedding = self.user_tower(user_cat,
+                                         user_num,
+                                         time_num,
+                                         hist_post_cat,
+                                         hist_post_num,
+                                         hist_targets,
+                                         hist_time_ind,
+                                         hist_mask
+                                         )
+
+
         item_embedding = self.item_tower(item_cat, item_num)
 
-        # Using cosine similarity - for FAISS search in the future
-        sim = nn.CosineSimilarity(dim=1)(user_embedding, item_embedding)
-
-        # Scaling for sigmoid
-        logits = sim * nn.Parameter(torch.tensor(5.0))
+        # # Using cosine similarity - for FAISS search in the future
+        # sim = nn.CosineSimilarity(dim=1)(user_embedding, item_embedding)
+        #
+        # # Scaling for sigmoid
+        # logits = sim * nn.Parameter(torch.tensor(5.0))
 
         # # Scalar product for vectors - sigmoid is to be added externally
-        # logits = torch.sum(user_embedding * item_embedding, dim=1)
+        logits = torch.sum(user_embedding * item_embedding, dim=1)
 
         return logits
 
@@ -803,27 +1024,46 @@ def _metrics(preds, y):
     y_pred = torch.sigmoid(torch.from_numpy(np.concatenate(preds))).numpy()
     y_pred_label = (y_pred >= find_best_threshold(y_true, y_pred )).astype(int)
     acc = accuracy_score(y_true, y_pred_label)
-    roc = roc_auc_score(y_true, y_pred)
-    return acc, roc
+    roc_auc = roc_auc_score(y_true, y_pred)
+    ap = average_precision_score(y_true, y_pred)
+    return acc, roc_auc, ap
 
 
 # Train epoch of NN learning
-def train(model, train_loader, optimizer, loss_fn, device) -> float:
+def train(model, train_loader, optimizer, loss_fn, device) -> tuple[int | Any, float | int, float, float]:
     model.train()
 
     train_loss = 0
-    # train_accuracy = 0
     y_true_list = []
     logits_list = []
 
     for batch in tqdm(train_loader, desc='Train', leave=False):
         batch = [x.to(device, non_blocking=True) for x in batch]
-        u_c, u_n, t_n, i_c, i_n, y = batch
+
+        (user_cat,
+         user_num,
+         time_num,
+         item_cat,
+         item_num,
+         hist_post_cat,
+         hist_post_num,
+         hist_targets,
+         hist_time_ind,
+         hist_mask,
+         y) = batch
 
         optimizer.zero_grad()
 
-        output = model(u_c, u_n, t_n, i_c, i_n)
-        # output, y = output.cpu(), y.cpu()
+        output = model(user_cat,
+                       user_num,
+                       time_num,
+                       item_cat,
+                       item_num,
+                       hist_post_cat,
+                       hist_post_num,
+                       hist_targets,
+                       hist_time_ind,
+                       hist_mask)
 
         loss = loss_fn(output, y)
         train_loss += loss.item()
@@ -836,14 +1076,14 @@ def train(model, train_loader, optimizer, loss_fn, device) -> float:
         # torch.cuda.empty_cache()
 
     train_loss /= len(train_loader)
-    train_accuracy, train_roc = _metrics(logits_list, y_true_list)
+    train_accuracy, train_roc, train_ap= _metrics(logits_list, y_true_list)
 
-    return train_loss, train_accuracy, train_roc
+    return train_loss, train_accuracy, train_roc, train_ap
 
 
 # Evaluate NN accuracy anf ROC for test data
 @torch.inference_mode()
-def evaluate(model, test_loader, loss_fn, device):
+def evaluate(model, test_loader, loss_fn, device) -> tuple[int | Any, float | int, float, float]:
     model.eval()
 
     test_loss = 0
@@ -852,9 +1092,29 @@ def evaluate(model, test_loader, loss_fn, device):
 
     for batch in tqdm(test_loader, desc='Evaluation', leave=False):
         batch = [x.to(device, non_blocking=True) for x in batch]
-        u_c, u_n, t_n, i_c, i_n, y = batch
 
-        output = model(u_c, u_n, t_n, i_c, i_n)
+        (user_cat,
+         user_num,
+         time_num,
+         item_cat,
+         item_num,
+         hist_post_cat,
+         hist_post_num,
+         hist_targets,
+         hist_time_ind,
+         hist_mask,
+         y) = batch
+
+        output = model(user_cat,
+                       user_num,
+                       time_num,
+                       item_cat,
+                       item_num,
+                       hist_post_cat,
+                       hist_post_num,
+                       hist_targets,
+                       hist_time_ind,
+                       hist_mask)
 
         y_true_list.append(y.detach().cpu().numpy())
         logits_list.append(output.detach().cpu().numpy())
@@ -864,9 +1124,9 @@ def evaluate(model, test_loader, loss_fn, device):
         test_loss += loss.item()
 
     test_loss /= len(test_loader)
-    train_accuracy, train_roc = _metrics(logits_list, y_true_list)
+    test_accuracy, test_roc, test_ap  = _metrics(logits_list, y_true_list)
 
-    return test_loss, train_accuracy, train_roc
+    return test_loss, test_accuracy, test_roc, test_ap
 
 
 # Make epoch plots for ACC and ROC
@@ -874,7 +1134,7 @@ def plot_history(hist):
     epochs = range(1, len(hist['train_roc']) + 1)
 
     plt.figure(figsize=(16, 8))
-    plt.subplot(1, 2, 1)
+    plt.subplot(1, 3, 1)
     plt.plot(epochs, hist['train_roc'], label='Train ROC‑AUC')
     plt.plot(epochs, hist['test_roc'], label='Test  ROC‑AUC')
     plt.xlabel('Epoch')
@@ -882,7 +1142,15 @@ def plot_history(hist):
     plt.legend()
     plt.grid()
 
-    plt.subplot(1, 2, 2)
+    plt.subplot(1, 3, 2)
+    plt.plot(epochs, hist['train_ap'], label='Train AP')
+    plt.plot(epochs, hist['test_ap'], label='Test  AP')
+    plt.xlabel('Epoch')
+    plt.ylabel('Average Precision')
+    plt.legend()
+    plt.grid()
+
+    plt.subplot(1, 3, 3)
     plt.plot(epochs, hist['train_acc'], label='Train Acc')
     plt.plot(epochs, hist['test_acc'], label='Test  Acc')
     plt.xlabel('Epoch')
@@ -894,14 +1162,28 @@ def plot_history(hist):
     plt.show()
 
 
-# Main co-rutine for NN training and validation with plots
-def whole_train_valid_cycle(train_loader, test_loader, epochs=N_EPOCHS, lr=LEARNING_RATE,
-                            device='cuda' if torch.cuda.is_available() else 'cpu', is_new_model=True):
+# Main co-routine for NN training and validation with plots
+def whole_train_valid_cycle(train_loader,
+                            test_loader,
+                            epochs=N_EPOCHS,
+                            lr=LEARNING_RATE,
+                            user_cat_features=USER_CAT_FEATURES,
+                            user_num_features_cnt=USER_NUM_FEATURES_CNT,
+                            time_features_cnt=TIME_FEATURES_CNT,
+                            embedding_dim: int = 64,
+                            history_length: int = HISTORY_LENGTH,
+                            device='cuda' if torch.cuda.is_available() else 'cpu',
+                            is_new_model=True):
     print(device)
 
     # Create NN model objects
-    user_tower = UserTower()
     item_tower = ItemTower()
+    user_tower = UserTower(user_cat_features=user_cat_features,
+                           user_num_features_cnt=user_num_features_cnt,
+                           time_features_cnt=time_features_cnt,
+                           item_tower=item_tower,
+                           history_length=history_length,
+                           embedding_dim=embedding_dim)
     model = TwoTowerModel(user_tower, item_tower)
 
     # If model is presented locally
@@ -925,26 +1207,24 @@ def whole_train_valid_cycle(train_loader, test_loader, epochs=N_EPOCHS, lr=LEARN
                'train_acc': [], 'test_acc': []}
 
     for epoch in range(1, epochs + 1):
-        tr_loss, tr_acc, tr_roc = train(model, train_loader, opt, loss_fn, device)
-        te_loss, te_acc, te_roc = evaluate(model, test_loader, loss_fn, device)
+        tr_loss, tr_acc, tr_roc, tr_ap = train(model, train_loader, opt, loss_fn, device)
+        te_loss, te_acc, te_roc, te_ap = evaluate(model, test_loader, loss_fn, device)
 
         history['train_roc'].append(tr_roc)
         history['test_roc'].append(te_roc)
         history['train_acc'].append(tr_acc)
         history['test_acc'].append(te_acc)
+        history['train_ap'].append(tr_ap)
+        history['test_ap'].append(te_ap)
 
         clear_output()
 
         print(f'E{epoch:02d}: '
-              f'train ROC {tr_roc:.4f}  ACC {tr_acc:.4f} | '
-              f'test ROC {te_roc:.4f}  ACC {te_acc:.4f}')
+              f'train ROC {tr_roc:.4f}  AP {tr_ap:.4f}  ACC {tr_acc:.4f} | '
+              f'test ROC {te_roc:.4f}   AP {te_ap:.4f}  ACC {te_acc:.4f}')
 
         plot_history(history)
 
     torch.save(model.state_dict(), '2Towers_cosine_4layer_drop_1_3_3_2_BCE_dec_1e4.pt')
 
     return model, history
-
-
-
-

@@ -2,7 +2,8 @@ from learn_model import (autoencoder_train,
                          Post_Data,
                          get_vector_df,
                          get_embedd_df,
-                         InteractionDataset,
+                         build_user_histories,
+                         InteractionDatasetWithHistory,
                          whole_train_valid_cycle,
                          USER_CAT_FEATURES,
                          ITEM_CAT_FEATURES,
@@ -23,20 +24,20 @@ if __name__ == "__main__":
     import torch
     from torch.utils.data import DataLoader, random_split
 
-    # Load env variables
-    load_dotenv()
-
-    # Load RoBerta and prepare text embeddings 768d
-    df_post_embed = make_roberta_embeddings()
-
-    # Train autoencoder
-    autoencoder_model, _ = autoencoder_train(df_post_embed)
-
-    # Create dataset object form post embeddings dataframe
-    post_dataset = Post_Data(df_post_embed)
-
-    # Receive 128d embeddings
-    df_post_128d = get_128d_embeddings(autoencoder_model, post_dataset)
+    # # Load env variables
+    # load_dotenv()
+    #
+    # # Load RoBerta and prepare text embeddings 768d
+    # df_post_embed = make_roberta_embeddings()
+    #
+    # # Train autoencoder
+    # autoencoder_model, _ = autoencoder_train(df_post_embed)
+    #
+    # # Create dataset object form post embeddings dataframe
+    # post_dataset = Post_Data(df_post_embed)
+    #
+    # # Receive 128d embeddings
+    # df_post_128d = get_128d_embeddings(autoencoder_model, post_dataset)
 
     df_post_128d = get_embedd_df(is_csv=True)
 
@@ -44,14 +45,19 @@ if __name__ == "__main__":
     # Fetch DB data for user, post and feed
     user_features, post_features, feed_encoded = get_vector_df(df_post_128d,
                                                                feed_n_lines=1512000,
-                                                               is_csv=False)
+                                                               is_csv=True)
 
-    dataset = InteractionDataset(feed_encoded,
-                                 user_features,
-                                 post_features,
-                                 USER_CAT_FEATURES,
-                                 ITEM_CAT_FEATURES
-                                 )
+    # Create dicts with user's histories of interactions - random max_history=50 interactions per user
+    user_hist_dict = build_user_histories(feed_encoded, max_history=50)
+
+    # Create dataset for learning with self-attention, with last lim_hist=8 interactions before the current one
+    dataset = InteractionDatasetWithHistory(feed_encoded,
+                                            user_features,
+                                            post_features,
+                                            USER_CAT_FEATURES,
+                                            ITEM_CAT_FEATURES,
+                                            user_histories=user_hist_dict,
+                                            lim_hist = 8)
 
     generator = torch.Generator().manual_seed(123)
 
@@ -87,5 +93,5 @@ if __name__ == "__main__":
     # user_features = pd.read_csv('user_df_encoded_for_2towers.csv', sep=';')
     # post_features = pd.read_csv('post_df_encoded_for_2towers.csv', sep=';')
 
-    df_to_sql(user_features, os.getenv('USER_FEATURES_NN'))
-    df_to_sql(post_features, os.getenv('POST_FEATURES_NN'))
+    # df_to_sql(user_features, os.getenv('USER_FEATURES_NN'))
+    # df_to_sql(post_features, os.getenv('POST_FEATURES_NN'))
