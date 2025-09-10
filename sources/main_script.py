@@ -18,6 +18,7 @@ import os
 N_EPOCHS = 3
 LEARNING_RATE = 5e-4
 BATCH_SIZE=256
+IS_NEW_MODEL=False
 
 if __name__ == "__main__":
 
@@ -87,7 +88,7 @@ if __name__ == "__main__":
                                              test_loader,
                                              epochs=N_EPOCHS,
                                              lr=LEARNING_RATE,
-                                             is_new_model=True)
+                                             is_new_model=IS_NEW_MODEL)
 
     # # Send user and post features to the DB from local .csv files
     # user_features = pd.read_csv('user_df_encoded_for_2towers.csv', sep=';')
