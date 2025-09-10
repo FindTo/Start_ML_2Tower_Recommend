@@ -718,40 +718,57 @@ class InteractionDatasetWithHistory(Dataset):
         # --- Item features for historical data ---
         hist_post_cat = torch.zeros((self.lim_hist, len(self.item_cat_columns)), dtype=torch.long)
         hist_post_num = torch.zeros((self.lim_hist, len(self.item_num_columns)), dtype=torch.float)
+        hist_time_ind = np.zeros(self.lim_hist, dtype=np.float32)
 
         if user_id in self.user_histories:
 
+            # get user history
             user_hist = self.user_histories[user_id]
+
+            mask_valid = user_hist['mask'] == 1 # valid events
             # Only events before current item
-            mask_time = user_hist['time_indicators'] < time_indicator
+            mask_time = (user_hist['time_indicators'] < time_indicator) & mask_valid
+            
+            # build historical post ids, targets, time indicators aligned with history window 
             filtered_post_ids = user_hist['post_ids'][mask_time]
             filtered_targets = user_hist['targets'][mask_time]
+            filtered_time_inds = user_hist['time_indicators'][mask_time]
 
+            # get number of historical events
             n_hist = min(self.lim_hist, len(filtered_post_ids))
+
+            # fill historical data
             if n_hist > 0:
                 hist_post_ids[-n_hist:] = filtered_post_ids[-n_hist:]
                 hist_interactions[-n_hist:] = filtered_targets[-n_hist:]
+                hist_time_ind[-n_hist:] = filtered_time_inds[-n_hist:]
                 hist_mask[-n_hist:] = 1.0  # mark as real events
 
-                for i in range(n_hist):
-                    post_id_hist = filtered_post_ids[-n_hist:][i]  # the last n_hist posts
-                    if post_id_hist == 0:  # padding check
-                        continue
-                    post_row = self.item_features.loc[post_id_hist]
-                    hist_post_cat[i] = torch.tensor([post_row[f] for f in self.item_cat_columns], dtype=torch.long)
-                    hist_post_num[i] = torch.tensor([post_row[f] for f in self.item_num_columns], dtype=torch.float)
+                # pick the last n_hist real historical ids
+                sel_ids = hist_post_ids[-n_hist:]
+
+                # fetch item categorical/numerical features in one shot (order preserved)
+                post_rows = self.item_features.loc[sel_ids]
+
+                hist_post_cat[-n_hist:] = torch.tensor(
+                    post_rows[self.item_cat_columns].to_numpy(),
+                    dtype=torch.long)
+
+                hist_post_num[-n_hist:] = torch.tensor(
+                    post_rows[self.item_num_columns].to_numpy(),
+                    dtype=torch.float)
 
         return (
             user_cat,
             user_num,
             torch.tensor(row[['time_indicator','hour_sin','hour_cos','weekday_sin',
-                              'weekday_cos','month_sin','month_cos','is_weekend']].values, dtype=torch.float),
+                            'weekday_cos','month_sin','month_cos','is_weekend']].values, dtype=torch.float),
             item_cat,
             item_num,
             hist_post_cat,
             hist_post_num,
             torch.tensor(hist_interactions, dtype=torch.float),
-            torch.tensor(time_indicator, dtype=torch.float),
+            torch.tensor(hist_time_ind, dtype=torch.float),
             torch.tensor(hist_mask, dtype=torch.float),
             torch.tensor(target, dtype=torch.float)
         )
@@ -878,8 +895,22 @@ class UserTower(nn.Module):
         x = x + self.fc2(x)  # skip connection
         static_emb = self.output(x)
 
+        # Reshape hist_post_cat and hist_post_num to flat, as long as ItemTower expects flat input
+
+        B, H, C = hist_post_cat.shape   # batch, hist_len, num_cat_features
+        _, _, N = hist_post_num.shape   # batch, hist_len, num_num_features
+
+        # Turn history into flat batch
+        hist_cat_flat = hist_post_cat.reshape(B*H, C)  # [B*H, C]
+        hist_num_flat = hist_post_num.reshape(B*H, N)  # [B*H, N]
+
+        # Apply ItemTower to history
+        hist_post_emb_flat = self.item_tower(hist_cat_flat, hist_num_flat)  # [B*H, embedding_dim]
+
         # --- History ---
-        hist_post_emb = self.item_tower(hist_post_cat, hist_post_num)  # [batch, hist_len, embedding_dim]
+        # Return hist_post_emb_flat to original shape
+        hist_post_emb = hist_post_emb_flat.reshape(B, H, -1)  # [B, H, embedding_dim]
+        # Add targets and time indicators to history
         hist_extra = torch.stack([hist_targets, hist_time_ind], dim=2)  # [batch, hist_len, 2]
         hist_x = torch.cat([hist_post_emb, hist_extra], dim=2)  # [batch, hist_len, embedding_dim + 2]
         hist_x = self.hist_proj(hist_x) # Align with embedding_dim
