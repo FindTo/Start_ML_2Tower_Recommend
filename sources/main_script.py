@@ -6,8 +6,7 @@ from learn_model import (autoencoder_train,
                          InteractionDatasetWithHistory,
                          whole_train_valid_cycle,
                          USER_CAT_FEATURES,
-                         ITEM_CAT_FEATURES,
-                         BATCH_SIZE,
+                         ITEM_CAT_FEATURES
                          )
 
 from get_post_embeddings import make_roberta_embeddings, get_128d_embeddings, df_to_sql
@@ -16,8 +15,9 @@ from dotenv import load_dotenv
 import pandas as pd
 import os
 
-N_EPOCHS = 9
+N_EPOCHS = 3
 LEARNING_RATE = 5e-4
+BATCH_SIZE=256
 
 if __name__ == "__main__":
 

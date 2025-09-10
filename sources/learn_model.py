@@ -751,7 +751,7 @@ class InteractionDatasetWithHistory(Dataset):
                 post_rows = self.item_features.loc[sel_ids]
 
                 hist_post_cat[-n_hist:] = torch.tensor(
-                    post_rows[self.item_cat_columns].to_numpy(),
+                    post_rows[list(self.item_cat_columns.keys())].to_numpy(),
                     dtype=torch.long)
 
                 hist_post_num[-n_hist:] = torch.tensor(
@@ -1023,13 +1023,13 @@ class TwoTowerModel(nn.Module):
 
         item_embedding = self.item_tower(item_cat, item_num)
 
-        # # Using cosine similarity - for FAISS search in the future
+        # # Using cosine similarity
         # sim = nn.CosineSimilarity(dim=1)(user_embedding, item_embedding)
         #
         # # Scaling for sigmoid
         # logits = sim * nn.Parameter(torch.tensor(5.0))
 
-        # # Scalar product for vectors - sigmoid is to be added externally
+        # Scalar product for vectors - sigmoid is to be added externally
         logits = torch.sum(user_embedding * item_embedding, dim=1)
 
         return logits
@@ -1050,13 +1050,75 @@ def find_best_threshold(y_true, y_pred_probs):
     return best_thresh
 
 # Binary accuracy and ROC calculation
+# def _metrics(preds, y):
+#     y_true = np.concatenate(y)
+#     y_pred = torch.sigmoid(torch.from_numpy(np.concatenate(preds))).numpy()
+#     y_pred_label = (y_pred >= find_best_threshold(y_true, y_pred )).astype(int)
+#     acc = accuracy_score(y_true, y_pred_label)
+#     roc_auc = roc_auc_score(y_true, y_pred)
+#     ap = average_precision_score(y_true, y_pred)
+#     return acc, roc_auc, ap
+
 def _metrics(preds, y):
+    """
+    Safe metrics calculation:
+    - preds: list/array of logits (1D) or logits/probs (2D with class dim)
+    - y: list/array of true labels
+    Returns: (acc, roc_auc, average_precision) -- roc_auc/ap may be nan if undefined
+    """
+    # concat lists
     y_true = np.concatenate(y)
-    y_pred = torch.sigmoid(torch.from_numpy(np.concatenate(preds))).numpy()
-    y_pred_label = (y_pred >= find_best_threshold(y_true, y_pred )).astype(int)
-    acc = accuracy_score(y_true, y_pred_label)
-    roc_auc = roc_auc_score(y_true, y_pred)
-    ap = average_precision_score(y_true, y_pred)
+    y_pred_arr = np.concatenate(preds)
+
+    # If model returned logits/probs for both classes, take positive-class scores
+    if y_pred_arr.ndim == 2 and y_pred_arr.shape[1] > 1:
+        y_score = y_pred_arr[:, 1].astype(float)
+    else:
+        y_score = y_pred_arr.ravel().astype(float)
+
+    # Numerically stable sigmoid (works on arrays)
+    # clip input to avoid overflow in exp
+    z = np.clip(y_score, -100, 100)
+    y_score = 1.0 / (1.0 + np.exp(-z))
+
+    # Filter non-finite rows
+    finite_mask = np.isfinite(y_true) & np.isfinite(y_score)
+    if finite_mask.sum() == 0:
+        return 0.0, float('nan'), float('nan')
+
+    y_true_f = y_true[finite_mask].astype(int)
+    y_score_f = y_score[finite_mask]
+
+    # If targets contain only one class, ROC/AP undefined
+    unique_labels = np.unique(y_true_f)
+    if unique_labels.size == 1:
+        preds_bin = (y_score_f >= 0.5).astype(int)
+        acc = accuracy_score(y_true_f, preds_bin)
+        return acc, float('nan'), float('nan')
+
+    # Find best threshold for accuracy (local), safe because arrays are finite
+    thresholds = np.arange(0.1, 0.9, 0.1)
+    best_acc = -1.0
+    best_t = 0.5
+    for t in thresholds:
+        acc_t = accuracy_score(y_true_f, (y_score_f >= t).astype(int))
+        if acc_t > best_acc:
+            best_acc = acc_t
+            best_t = t
+
+    y_pred_label = (y_score_f >= best_t).astype(int)
+    acc = accuracy_score(y_true_f, y_pred_label)
+
+    try:
+        roc_auc = roc_auc_score(y_true_f, y_score_f)
+    except Exception:
+        roc_auc = float('nan')
+
+    try:
+        ap = average_precision_score(y_true_f, y_score_f)
+    except Exception:
+        ap = float('nan')
+
     return acc, roc_auc, ap
 
 
@@ -1235,7 +1297,8 @@ def whole_train_valid_cycle(train_loader,
     loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     history = {'train_roc': [], 'test_roc': [],
-               'train_acc': [], 'test_acc': []}
+               'train_acc': [], 'test_acc': [],
+               'train_ap': [], 'test_ap': []}
 
     for epoch in range(1, epochs + 1):
         tr_loss, tr_acc, tr_roc, tr_ap = train(model, train_loader, opt, loss_fn, device)
@@ -1256,6 +1319,6 @@ def whole_train_valid_cycle(train_loader,
 
         plot_history(history)
 
-    torch.save(model.state_dict(), '2Towers_cosine_4layer_drop_1_3_3_2_BCE_dec_1e4.pt')
+        torch.save(model.state_dict(), '2Towers_cosine_4layer_drop_1_3_3_2_BCE_dec_1e4.pt')
 
     return model, history
