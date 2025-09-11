@@ -9,56 +9,6 @@ from torch.utils.data import DataLoader
 from datasets import Dataset
 from tqdm import tqdm
 
-# Load DF with features from DB using chunks
-def load_features(features_name) -> pd.DataFrame:
-
-    engine = create_engine(os.getenv('DATABASE_URL'))
-    conn = engine.connect().execution_options(stream_results=True)
-    chunks = []
-
-    try:
-
-        print(("from sql - start loading"))
-        for chunk_dataframe in pd.read_sql(features_name,
-                                           conn, chunksize=int(os.getenv('CHUNKSIZE'))):
-
-            chunks.append(chunk_dataframe)
-
-        print(("from sql - loaded successfully"))
-
-    except Exception as e:
-
-        raise RuntimeError(f"Loading error: {e}")
-
-    finally:
-        conn.close()
-
-    return pd.concat(chunks, ignore_index=True)
-
-# Send DF to the DB  - no chunks
-def df_to_sql(df, name):
-
-    # Try to write DF into the db by chunks
-    engine = create_engine(os.getenv('DATABASE_URL'))
-    conn = engine.connect().execution_options(stream_results=True)
-    chunks = []
-    try:
-
-        print((f"to_sql - start writing {name}"))
-        df.to_sql(name,
-                  con=engine,
-                  if_exists='replace',
-                  index=False)
-        print((f"to_sql - {name} successfully written"))
-        conn.close()
-
-    except:
-
-        print((f"to_sql - failed to write {name}"))
-        conn.close()
-
-    return 0
-
 # Choose NN model for text encoding
 def get_model(model_name):
     assert model_name in ['bert', 'roberta', 'distilbert']
@@ -146,14 +96,3 @@ def get_128d_embeddings(model:Autoencoder, dataset:Post_Data):
     df_post_128d.to_csv('df_post_128d_embedd_with_id_pure.csv', sep=';', index=False)
 
     return df_post_128d
-
-
-
-
-
-
-
-
-
-
-

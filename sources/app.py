@@ -9,14 +9,20 @@ from table_feed import Feed
 from schema import UserGet, PostGet, FeedGet
 from typing import List
 from datetime import datetime
-from get_features_table import load_features, get_post_df
+from get_features_table import (load_features, 
+                                get_post_df, 
+                                load_sql_df, 
+                                FEED_FEATURES_TYPE_MAP)
 from get_model import load_models
 from learn_model import (ItemDataset,
                          ITEM_CAT_FEATURES,
-                         USER_CAT_FEATURES)
+                         USER_CAT_FEATURES, 
+                         TwoTowerModel,
+                         build_user_histories)
 from dotenv import load_dotenv
 import torch
 import numpy as np
+import pandas as pd
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import os
@@ -42,7 +48,7 @@ def generate_item_embeddings(model, item_dataset, device='cpu'):
         for batch in tqdm(loader, desc='Item Embeddings', leave=False):
             item_cat = batch[0].to(device)         # shape [B, C]
             item_num = batch[1].to(device)         # shape [B, N]
-            item_ids = batch[2]                    # для связи
+            item_ids = batch[2]                    
 
             item_embeds = model.item_tower(item_cat, item_num)
             all_item_ids.extend(item_ids)
@@ -53,7 +59,14 @@ def generate_item_embeddings(model, item_dataset, device='cpu'):
     return id_tensor.numpy().astype('int32'), embeddings_tensor.numpy().astype('float32')
 
 # Get user embedding by user idm user df features and timestamp using NN model inference mode
-def get_user_embedding(user_id, timestamp, user_df, model, device='cpu'):
+def get_user_embedding( user_id: int, 
+                        timestamp: datetime, 
+                        user_df: pd.DataFrame,
+                        post_df: pd.DataFrame,
+                        user_hist_dict: dict,
+                        model:TwoTowerModel, 
+                        device='cpu'):
+
     user_num_features = [x for x in user_df.columns.to_list() if x not in USER_CAT_FEATURES.keys()]
 
     # Get time features encoded to sin/cos
@@ -111,6 +124,77 @@ def get_user_embedding(user_id, timestamp, user_df, model, device='cpu'):
 
         return time_list
 
+    # We have user_hist_dict with random N=max_history records
+    # Now we need limit it to lim_hist records - most actual before the current timestamp
+    def get_hist_limited(   user_id: int,
+                            time_indicator: float,
+                            user_histories: dict,
+                            item_features: pd.DataFrame, 
+                            item_cat: dict,
+                            lim_hist=8):
+
+        item_cat_columns = item_cat
+        item_num_columns = [x for x in item_features.columns if x not in item_cat_columns]
+
+        # --- User history ---
+        hist_post_ids = np.zeros(lim_hist, dtype=np.int32)
+        hist_interactions = np.zeros(lim_hist, dtype=np.float32)
+        hist_mask = np.zeros(lim_hist, dtype=np.float32)
+
+        # --- Item features for historical data ---
+        hist_post_cat = torch.zeros((lim_hist, len(item_cat_columns)), dtype=torch.long)
+        hist_post_num = torch.zeros((lim_hist, len(item_num_columns)), dtype=torch.float)
+        hist_time_ind = np.zeros(lim_hist, dtype=np.float32)
+
+        if user_id in user_histories:
+
+            # get user history
+            user_hist = user_histories[user_id]
+
+            mask_valid = user_hist['mask'] == 1 # valid events
+            # Only events before current item
+            mask_time = (user_hist['time_indicators'] < time_indicator) & mask_valid
+            
+            # build historical post ids, targets, time indicators aligned with history window 
+            filtered_post_ids = user_hist['post_ids'][mask_time]
+            filtered_targets = user_hist['targets'][mask_time]
+            filtered_time_inds = user_hist['time_indicators'][mask_time]
+
+            # get number of historical events
+            n_hist = min(lim_hist, len(filtered_post_ids))
+
+            # fill historical data
+            if n_hist > 0:
+                hist_post_ids[-n_hist:] = filtered_post_ids[-n_hist:]
+                hist_interactions[-n_hist:] = filtered_targets[-n_hist:]
+                hist_time_ind[-n_hist:] = filtered_time_inds[-n_hist:]
+                hist_mask[-n_hist:] = 1.0  # mark as real events
+
+                # pick the last n_hist real historical ids
+                sel_ids = hist_post_ids[-n_hist:]
+
+                # fetch item categorical/numerical features in one shot (order preserved)
+                post_rows = item_features.loc[sel_ids]
+
+                hist_post_cat[-n_hist:] = torch.tensor(
+                    post_rows[list(item_cat_columns.keys())].to_numpy(),
+                    dtype=torch.long)
+
+                hist_post_num[-n_hist:] = torch.tensor(
+                    post_rows[item_num_columns].to_numpy(),
+                    dtype=torch.float)
+
+            # Ensure at least one valid entry for transformer
+            if n_hist == 0:
+                hist_mask[0] = 1.0  # Mark first position as valid
+
+        return( hist_post_cat, 
+                hist_post_num, 
+                torch.tensor(hist_interactions, dtype=torch.float),
+                torch.tensor(hist_time_ind, dtype=torch.float),
+                torch.tensor(hist_mask, dtype=torch.float)
+                )
+
     try:
         # Find user by input ID
         user_row = user_df.loc[user_id]
@@ -122,12 +206,35 @@ def get_user_embedding(user_id, timestamp, user_df, model, device='cpu'):
     # Convert to tensors using correct datatypes
     user_cat = torch.tensor([[user_row[cat] for cat in USER_CAT_FEATURES]], dtype=torch.long).to(device)
     user_num = torch.tensor([[user_row[num] for num in user_num_features]], dtype=torch.float32).to(device)
-    time_num = torch.tensor([prepare_time_features(timestamp)], dtype=torch.float32).to(device)
+    
+    # Get time_indicator and the whole tensor of time features
+    time_features_list=prepare_time_features(timestamp)
+    time_indicator = time_features_list[0]
+    time_num = torch.tensor([time_features_list], dtype=torch.float32).to(device)
+
+    # Retrieve hostorical posts data per user - for transformer layers
+    (hist_post_cat, 
+    hist_post_num, 
+    hist_targets,
+    hist_time_ind,
+    hist_mask)=get_hist_limited(user_id,
+                                time_indicator,
+                                user_hist_dict,
+                                post_df,
+                                ITEM_CAT_FEATURES)
 
     # Retrieve embedding
     model.eval()
     with torch.no_grad():
-        embedding = model.user_tower(user_cat, user_num, time_num)
+        embedding = model.user_tower(   user_cat, 
+                                        user_num, 
+                                        time_num,
+                                        hist_post_cat.unsqueeze(0),
+                                        hist_post_num.unsqueeze(0),
+                                        hist_targets.unsqueeze(0),
+                                        hist_time_ind.unsqueeze(0),
+                                        hist_mask.unsqueeze(0)
+                                    )
 
     return embedding.cpu().numpy().squeeze().astype('float32')
 
@@ -145,15 +252,20 @@ def recommend_top_k(user_embedding: np.ndarray,
                     item_embeddings: np.ndarray,
                     item_ids: np.ndarray,
                     k: int = 5):
-    # Normalize user's and item embeddings
-    user_embedding_norm = user_embedding / np.linalg.norm(user_embedding)
-    item_embeddings_norm = normalize_vectors(item_embeddings)
 
-    # Calculate cosine similarity
-    scores = item_embeddings_norm @ user_embedding_norm
+    # # Normalize user's and item embeddings
+    # user_embedding_norm = user_embedding / np.linalg.norm(user_embedding)
+    # item_embeddings_norm = normalize_vectors(item_embeddings)
 
-    # Receive probability using sigmoid and scaled logit
-    probabilities = sigmoid(scores * 5)
+    # # Calculate cosine similarity
+    # scores = item_embeddings_norm @ user_embedding_norm
+
+    # Calculate dot product
+    scores = item_embeddings @ user_embedding
+
+    # # Receive probability using sigmoid and scaled logit
+    # probabilities = sigmoid(scores * 5)
+    probabilities = sigmoid(scores)
 
     # Sort by probability, descend
     sorted_idx = np.argsort(-probabilities)
@@ -168,9 +280,15 @@ user_df = load_features(os.getenv('USER_FEATURES_NN'))
 user_df['user_id_idx'] = user_df['user_id']
 user_df.set_index('user_id_idx', inplace=True)
 
-# Load post df and create ItemDataset
+# Load post df with features and create ItemDataset
 post_df = load_features(os.getenv('POST_FEATURES_NN'))
 item_dataset = ItemDataset(post_df,ITEM_CAT_FEATURES )
+
+# Create user histories dictionary (limited to 100 lines per user)
+# Use feed df with features - download from SQL table
+user_hist_dict=build_user_histories(load_sql_df(os.getenv('FEED_FEATURES_NN'),
+                                                FEED_FEATURES_TYPE_MAP),
+                                                max_history=100)
 
 # Load 2Tower model
 model = load_models(os.getenv('NN_MODEL_NAME'))
@@ -228,23 +346,17 @@ def get_post_feed(id: int, limit: int = 10, db: Session = Depends(get_db)):
 
     return db.query(Feed).filter(Feed.post_id == id).order_by(desc(Feed.time)).limit(limit).all()
 
-# @app.get("/post/recommendations/", response_model=List[PostGet])
-# def get_post_recomended(id: int, limit: int = 10, db: Session = Depends(get_db)):
-#
-#     post_liked = db.query(Post, func.count(Feed.user_id)).select_from(Feed
-#                           ).join(Post, Feed.post_id == Post.id).filter(Feed.action == 'like'
-#                                    ).group_by(Post
-#                                               ).order_by(desc(func.count(Feed.user_id))).limit(limit).all()
-#
-#     return [x[0] for x in post_liked]
-
 @app.get("/post/recommendations/", response_model=List[PostGet])
 def recommended_posts(id: int, time: datetime, limit: int = 5) -> List[PostGet]:
     # logger.info("Endpoint enter")
 
-    # Create user embedding - timestamp convertion and single NN reference
-    user_embed = get_user_embedding(id, time, user_df, model)
-
+    # Create user embedding - timestamp convertion and single NN reference + user history creation
+    user_embed = get_user_embedding(id, 
+                                    time, 
+                                    user_df,
+                                    post_df,
+                                    user_hist_dict,
+                                    model)
 
     post_ids, post_prob, post_scor  = recommend_top_k(user_embed,
                                                       item_embeds_np,
@@ -257,17 +369,19 @@ def recommended_posts(id: int, time: datetime, limit: int = 5) -> List[PostGet]:
     posts_recommend = post_ids.tolist()
     # post_prob = post_prob.tolist()
 
-    # logger.info(posts_recommend)
-    # logger.info(post_prob)
+    logger.info(posts_recommend)
+    logger.info(post_prob)
 
     posts_recommend_list = []
 
     # Making response by Pydantic using the obtained post IDs
     for i in posts_recommend:
+        
+        post_row = post_original_df[post_original_df['post_id'] == i]
 
         posts_recommend_list.append(PostGet(id=i,
-                                        text=post_original_df[post_df['post_id'] == i].text.iloc[0],
-                                        topic=post_original_df[post_df['post_id'] == i].topic.iloc[0])
+                                        text=post_row.text.iloc[0],
+                                        topic=post_row.topic.iloc[0])
                                 )
 
     return posts_recommend_list

@@ -1,6 +1,5 @@
 import math
 from typing import Any
-
 import pandas as pd
 import numpy as np
 import torch
@@ -12,6 +11,10 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from IPython.display import clear_output
 import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Parameters
 USER_CAT_FEATURES = {
@@ -587,7 +590,7 @@ class ItemDataset(Dataset):
         return item_cat, item_num, item_id
 
 
-def build_user_histories(feed_encoded: pd.DataFrame, max_history: int = 50):
+def build_user_histories(feed_encoded: pd.DataFrame, max_history: int = 100):
     """
     Build user history pool for Transformer-based UserTower.
     For each user, store their events sorted by time_indicator.
@@ -697,7 +700,6 @@ class InteractionDatasetWithHistory(Dataset):
         row = self.feed_df.iloc[idx]
         user_id = row['user_id']
         post_id = row['post_id']
-        target = row['target']
         time_indicator = row['time_indicator']
 
         # --- User main features ---
@@ -757,6 +759,11 @@ class InteractionDatasetWithHistory(Dataset):
                 hist_post_num[-n_hist:] = torch.tensor(
                     post_rows[self.item_num_columns].to_numpy(),
                     dtype=torch.float)
+            
+            # Ensure at least one valid entry for transformer
+            if n_hist == 0:
+                hist_mask[0] = 1.0  # Mark first position as valid
+
 
         return (
             user_cat,
@@ -770,7 +777,6 @@ class InteractionDatasetWithHistory(Dataset):
             torch.tensor(hist_interactions, dtype=torch.float),
             torch.tensor(hist_time_ind, dtype=torch.float),
             torch.tensor(hist_mask, dtype=torch.float),
-            torch.tensor(target, dtype=torch.float)
         )
 
 # User tower - NN for user embedding
