@@ -39,7 +39,7 @@ def load_models(model_path, user_cat_features=USER_CAT_FEATURES,
 
     model.load_state_dict(torch.load(model_path,
                                      map_location=torch.device('cpu'),
-                                     weights_only=False)
+                                    )
                           )
     model.eval()
 
