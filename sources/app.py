@@ -245,7 +245,10 @@ def normalize_vectors(vectors):
 
 # Sigmoid np function
 def sigmoid(x):
-    return 1 / (1 + np.exp(-x))
+    
+    # clip input to avoid overflow in exp
+    z = np.clip(x, -100, 100)
+    return 1 / (1 + np.exp(-z))
 
 # Retrieve k most probably liked posts with ids, probabilities and cosine scores
 def recommend_top_k(user_embedding: np.ndarray,

@@ -701,6 +701,7 @@ class InteractionDatasetWithHistory(Dataset):
         user_id = row['user_id']
         post_id = row['post_id']
         time_indicator = row['time_indicator']
+        target =  row['target']
 
         # --- User main features ---
         user_row = self.user_features.loc[user_id]
@@ -777,6 +778,7 @@ class InteractionDatasetWithHistory(Dataset):
             torch.tensor(hist_interactions, dtype=torch.float),
             torch.tensor(hist_time_ind, dtype=torch.float),
             torch.tensor(hist_mask, dtype=torch.float),
+            torch.tensor(target, dtype=torch.float)
         )
 
 # User tower - NN for user embedding
@@ -1042,18 +1044,18 @@ class TwoTowerModel(nn.Module):
 
 
 # Choose the best probability threshold for max accuracy
-def find_best_threshold(y_true, y_pred_probs):
-    thresholds = np.arange(0.1, 0.9, 0.1)
-    best_acc = 0
-    best_thresh = 0.5
-    for t in thresholds:
-        y_pred = (y_pred_probs >= t).astype(int)
-        acc = accuracy_score(y_true, y_pred)
-        if acc > best_acc:
-            best_acc = acc
-            best_thresh = t
-    print("Best threshold for accuracy:", best_thresh)
-    return best_thresh
+# def find_best_threshold(y_true, y_pred_probs):
+#     thresholds = np.arange(0.1, 0.9, 0.1)
+#     best_acc = 0
+#     best_thresh = 0.5
+#     for t in thresholds:
+#         y_pred = (y_pred_probs >= t).astype(int)
+#         acc = accuracy_score(y_true, y_pred)
+#         if acc > best_acc:
+#             best_acc = acc
+#             best_thresh = t
+#     print("Best threshold for accuracy:", best_thresh)
+#     return best_thresh
 
 # Binary accuracy and ROC calculation
 # def _metrics(preds, y):
